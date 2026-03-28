@@ -1,256 +1,103 @@
-import io
-import os
-import zipfile
-import tempfile
-import streamlit as st
-from openpyxl import load_workbook
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.utils import get_column_letter
-from PIL import Image, ImageDraw, ImageFont
+import pandas as pd
 import qrcode
+from PIL import Image, ImageDraw, ImageFont
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+import os
 
 # =========================
-# A4 LABEL SETTINGS
+# SETTINGS
 # =========================
-LABEL_COLS = 3
-LABEL_ROWS = 7
-EXCEL_IMG_W = 240
-EXCEL_IMG_H = 380
-LABEL_COL_WIDTH = 22
-LABEL_ROW_HEIGHT = 300
-
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGO_PATH = os.path.join(APP_DIR, "logo.png")
+QR_SIZE = 260
+TEXT_COLOR = (255, 102, 0)
+FONT_SIZE = 48
+LOGO_PATH = "logo.png"
 
 # =========================
-# IMAGE CREATION
+# LOAD FONT
 # =========================
-def make_qr_block(qr_data, building_id, out_png):
-    logo = Image.open(LOGO_PATH).convert("RGBA")
+def load_font():
+    try:
+        return ImageFont.truetype("arialbd.ttf", FONT_SIZE)
+    except:
+        return ImageFont.load_default()
 
-    qr = qrcode.QRCode(
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=10,
-        border=2,
+# =========================
+# GENERATE QR
+# =========================
+def generate_qr(data):
+    qr = qrcode.make(data)
+    return qr.resize((QR_SIZE, QR_SIZE))
+
+# =========================
+# CREATE STICKER
+# =========================
+def create_sticker(building_code, national_address, logo):
+    font = load_font()
+
+    qr_data = f"{building_code} - {national_address}"
+    qr_img = generate_qr(qr_data)
+
+    logo = logo.resize((QR_SIZE, int(logo.height * (QR_SIZE / logo.width))))
+
+    # canvas
+    width = QR_SIZE + 40
+    height = logo.height + QR_SIZE + 120
+    img = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(img)
+
+    # positions
+    x_center = width // 2
+
+    y_logo = 10
+    y_qr = y_logo + logo.height + 20
+    y_text = y_qr + QR_SIZE + 30
+
+    # paste
+    img.paste(logo, (x_center - logo.width // 2, y_logo))
+    img.paste(qr_img, (x_center - QR_SIZE // 2, y_qr))
+
+    # text
+    draw.text(
+        (x_center, y_text),
+        building_code,
+        fill=TEXT_COLOR,
+        font=font,
+        anchor="mm"
     )
-    qr.add_data(qr_data)
-    qr.make(fit=True)
 
-    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGBA")
-    qr_img = qr_img.resize((260, 260), Image.NEAREST)
-
-    scale = min(260 / logo.width, 90 / logo.height)
-    logo = logo.resize((int(logo.width * scale), int(logo.height * scale)), Image.LANCZOS)
-
-    canvas = Image.new("RGBA", (300, 420), "white")
-    canvas.paste(logo, ((300 - logo.width) // 2, 10), logo)
-    canvas.paste(qr_img, ((300 - 260) // 2, 10 + logo.height + 10), qr_img)
-
-    draw = ImageDraw.Draw(canvas)
-    orange = (255, 140, 0)
-
-    font = None
-    for fp in [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "C:/Windows/Fonts/arialbd.ttf",
-        "C:/Windows/Fonts/calibrib.ttf",
-    ]:
-        try:
-            font = ImageFont.truetype(fp, 28)
-            break
-        except:
-            pass
-    if font is None:
-        font = ImageFont.load_default()
-
-    text = str(building_id)
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    draw.text(((300 - tw) // 2, 420 - th - 20), text, fill=orange, font=font)
-
-    canvas.convert("RGB").save(out_png, "PNG")
+    return img
 
 # =========================
-# STRICT: find header row containing Building Code
-# If not found => return None (skip sheet)
+# MAIN
 # =========================
-def find_header_row(ws):
-    for r in range(1, 60):
-        row_vals = [str(ws.cell(r, c).value or "").strip().lower()
-                    for c in range(1, ws.max_column + 1)]
-        if "building code" in row_vals or "building id" in row_vals:
-            return r
-    return None
+input_file = "JED-HRR2-SALH-11-MP.xlsx"
+output_file = "FINAL_QR_Customers.xlsx"
 
-def detect_columns(ws, header_row):
-    headers = {}
-    for c in range(1, ws.max_column + 1):
-        v = ws.cell(header_row, c).value
-        if v:
-            headers[str(v).strip().lower()] = c
+df = pd.read_excel(input_file, sheet_name="Customers")
+logo = Image.open(LOGO_PATH)
 
-    def exact(names):
-        for n in names:
-            if n in headers:
-                return headers[n]
-        return None
+wb = Workbook()
+ws = wb.active
+ws.title = "Customers_QR"
 
-    def contains(keys):
-        for k, v in headers.items():
-            for key in keys:
-                if key in k:
-                    return v
-        return None
+ws.append(["SR", "Building Code", "National Address", "QR"])
 
-    col_building = exact(["building code", "building id"]) or contains(["building code", "building id"])
-    col_address  = exact(["national address"]) or contains(["national address", "address"])
-    col_qr       = exact(["barcode", "qr"]) or contains(["barcode", "qr"])
+for i, row in df.iterrows():
+    building = str(row["Building Code"])
+    address = str(row["National Address"])
 
-    if col_building is None:
-        return None
+    img = create_sticker(building, address, logo)
 
-    if col_address is None:
-        col_address = min(col_building + 1, ws.max_column)
+    img_path = f"temp_{i}.png"
+    img.save(img_path)
 
-    if col_qr is None:
-        col_qr = ws.max_column + 1
-        ws.cell(header_row, col_qr, "Barcode")
+    ws.append([row["SR"], building, address])
 
-    return col_building, col_address, col_qr
+    xl_img = XLImage(img_path)
+    xl_img.width = 180
+    xl_img.height = 220
 
-# =========================
-# LABEL SHEET
-# =========================
-def setup_labels_sheet(wb):
-    if "LABELS" in wb.sheetnames:
-        del wb["LABELS"]
-    ws = wb.create_sheet("LABELS")
+    ws.add_image(xl_img, f"D{i+2}")
 
-    ws.page_setup.paperSize = ws.PAPERSIZE_A4
-    ws.page_setup.orientation = ws.ORIENTATION_PORTRAIT
-
-    for c in range(1, LABEL_COLS + 1):
-        ws.column_dimensions[get_column_letter(c)].width = LABEL_COL_WIDTH
-
-    return ws
-
-# Basic validity: avoid picking "City/Region" etc as ID
-def looks_like_building_id(x):
-    s = str(x).strip()
-    if len(s) < 6:
-        return False
-    # Most of your IDs are like D9175... or numeric long
-    if s[0].isalpha() and len(s) >= 8:
-        return True
-    if s.isdigit() and len(s) >= 8:
-        return True
-    return False
-
-# =========================
-# PROCESS ONE FILE
-# =========================
-def process_xlsx(xlsx_bytes, filename):
-    with tempfile.TemporaryDirectory() as td:
-        src = os.path.join(td, filename)
-        with open(src, "wb") as f:
-            f.write(xlsx_bytes)
-
-        wb = load_workbook(src)
-
-        # Create fresh LABELS sheet (aggregate from all processed sheets)
-        labels_ws = setup_labels_sheet(wb)
-        all_images = []
-
-        # Process ALL sheets that contain Building Code header
-        for ws in wb.worksheets:
-            if ws.title.strip().upper() == "LABELS":
-                continue
-
-            header_row = find_header_row(ws)
-            if header_row is None:
-                # ✅ Skip non-data sheets (City/Region template sheets)
-                continue
-
-            cols = detect_columns(ws, header_row)
-            if cols is None:
-                continue
-
-            col_building, col_address, col_qr = cols
-
-            # clear old images on that sheet
-            try:
-                ws._images = []
-            except:
-                pass
-
-            qr_col_letter = get_column_letter(col_qr)
-            ws.column_dimensions[qr_col_letter].width = 26
-
-            # Generate QR blocks row by row
-            for r in range(header_row + 1, ws.max_row + 1):
-                bid = ws.cell(r, col_building).value
-                if not bid or not looks_like_building_id(bid):
-                    continue
-
-                addr = ws.cell(r, col_address).value
-                qr_data = str(bid).strip()
-                if addr:
-                    qr_data += "\n" + str(addr).strip()
-
-                img_path = os.path.join(td, f"{ws.title}_{r}.png")
-                make_qr_block(qr_data, bid, img_path)
-                all_images.append(img_path)
-
-                img = XLImage(img_path)
-                img.width = EXCEL_IMG_W
-                img.height = EXCEL_IMG_H
-                ws.add_image(img, f"{qr_col_letter}{r}")
-                ws.row_dimensions[r].height = 285
-
-        # Fill LABELS from all_images
-        per_page = LABEL_COLS * LABEL_ROWS
-        for i, img_path in enumerate(all_images):
-            page = i // per_page
-            pos = i % per_page
-            row = page * (LABEL_ROWS + 1) + (pos // LABEL_COLS) + 1
-            col = (pos % LABEL_COLS) + 1
-
-            labels_ws.row_dimensions[row].height = LABEL_ROW_HEIGHT
-            cell = f"{get_column_letter(col)}{row}"
-
-            img = XLImage(img_path)
-            img.width = EXCEL_IMG_W
-            img.height = EXCEL_IMG_H
-            labels_ws.add_image(img, cell)
-
-        out = io.BytesIO()
-        wb.save(out)
-        return out.getvalue()
-
-# =========================
-# STREAMLIT UI
-# =========================
-st.set_page_config(page_title="QR Excel Generator", layout="centered")
-st.title("QR Code Excel Generator (Logo + A4 Labels)")
-
-files = st.file_uploader("Upload Excel files (.xlsx)", type=["xlsx"], accept_multiple_files=True)
-
-if files:
-    if st.button("Generate"):
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
-            for f in files:
-                result = process_xlsx(f.read(), f.name)
-                out_name = f.name.replace(".xlsx", "_QR_READY.xlsx")
-                z.writestr(out_name, result)
-
-        st.success("Done ✅")
-        st.download_button(
-            "Download ZIP (QR_READY files)",
-            zip_buf.getvalue(),
-            file_name="QR_READY_OUTPUT.zip",
-            mime="application/zip",
-        )
-else:
-    st.info("Upload one or more Excel files to begin.")
+wb.save(output_file)
